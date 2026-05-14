@@ -1,0 +1,4 @@
+from nerfstudio.plugins.registry_dataparser import DataParserSpecification
+from xray_base.rotate_xray_dataparser import RotatedXRayDataParserConfig
+
+xray_base_dataparser = DataParserSpecification(config=RotatedXRayDataParserConfig())

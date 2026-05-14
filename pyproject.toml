@@ -1,13 +1,17 @@
 [project]
-name = "nerfstudio-method-template"
-description = "Template repository for creating and registering new methods in nerfstudio."
+name = "xray_base"
+description = "Xray nerf base"
 version = "0.1.0"
 
 dependencies = ["nerfstudio >= 0.3.0"] 
 
 [tool.setuptools.packages.find]
-include = ["method_template*"]
+include = ["xray_base*"]
+
+[project.entry-points.'nerfstudio.dataparser_configs']
+xray_base_dataparser = 'xray_base.dataparser_config:xray_base_dataparser'
 
 # register the entry point of your new method here:
 [project.entry-points.'nerfstudio.method_configs']
-method-template = 'method_template.template_config:method_template'
+xray_base = 'xray_base.method_config:xray_base'
+

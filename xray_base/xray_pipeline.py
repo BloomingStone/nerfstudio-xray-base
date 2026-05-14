@@ -10,8 +10,8 @@ import torch.distributed as dist
 from torch.cuda.amp.grad_scaler import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from method_template.template_datamanager import TemplateDataManagerConfig
-from method_template.template_model import TemplateModel, TemplateModelConfig
+from xray_base.xray_datamanager import XrayDataManagerConfig
+from xray_base.xray_model import XRayModel, XRayModelConfig
 from nerfstudio.data.datamanagers.base_datamanager import (
     DataManager,
     DataManagerConfig,
@@ -24,19 +24,19 @@ from nerfstudio.pipelines.base_pipeline import (
 
 
 @dataclass
-class TemplatePipelineConfig(VanillaPipelineConfig):
+class XrayPipelineConfig(VanillaPipelineConfig):
     """Configuration for pipeline instantiation"""
 
-    _target: Type = field(default_factory=lambda: TemplatePipeline)
+    _target: Type = field(default_factory=lambda: XrayPipeline)
     """target class to instantiate"""
-    datamanager: DataManagerConfig = TemplateDataManagerConfig()
+    datamanager: DataManagerConfig = field(default_factory=XrayDataManagerConfig)
     """specifies the datamanager config"""
-    model: ModelConfig = TemplateModelConfig()
+    model: ModelConfig = field(default_factory=XRayModelConfig)
     """specifies the model config"""
 
 
-class TemplatePipeline(VanillaPipeline):
-    """Template Pipeline
+class XrayPipeline(VanillaPipeline):
+    """Xray Pipeline
 
     Args:
         config: the pipeline config used to instantiate class
@@ -44,7 +44,7 @@ class TemplatePipeline(VanillaPipeline):
 
     def __init__(
         self,
-        config: TemplatePipelineConfig,
+        config: XrayPipelineConfig,
         device: str,
         test_mode: Literal["test", "val", "inference"] = "val",
         world_size: int = 1,
@@ -57,7 +57,6 @@ class TemplatePipeline(VanillaPipeline):
         self.datamanager: DataManager = config.datamanager.setup(
             device=device, test_mode=test_mode, world_size=world_size, local_rank=local_rank
         )
-        self.datamanager.to(device)
 
         assert self.datamanager.train_dataset is not None, "Missing input dataset"
         self._model = config.model.setup(
@@ -72,6 +71,6 @@ class TemplatePipeline(VanillaPipeline):
         self.world_size = world_size
         if world_size > 1:
             self._model = typing.cast(
-                TemplateModel, DDP(self._model, device_ids=[local_rank], find_unused_parameters=True)
+                XRayModel, DDP(self._model, device_ids=[local_rank], find_unused_parameters=True)
             )
             dist.barrier(device_ids=[local_rank])
