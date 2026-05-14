@@ -85,7 +85,7 @@ class RotatedXRayDataParser(DataParser):
         return metadata, data_dir
 
     @staticmethod
-    def _volume_aabb(affine: np.ndarray, volume_size: list[int], margin: float = 100) -> torch.Tensor:
+    def _volume_aabb(affine: np.ndarray, volume_size: list[int], margin: float = 0) -> torch.Tensor:
         """
         Compute the axis-aligned bounding box of a volume given its affine transformation and size.
         Args:

@@ -24,23 +24,22 @@ xray_base = MethodSpecification(
         pipeline=XrayPipelineConfig(
             datamanager=XrayDataManagerConfig(
                 dataparser=RotatedXRayDataParserConfig(),
-                train_num_rays_per_batch=2048,
+                train_num_rays_per_batch=1024,
                 eval_num_rays_per_batch=4096,
             ),
             model=XRayModelConfig(
-                eval_num_rays_per_chunk=1 << 15,
-                num_samples_per_ray=256,
+                eval_num_rays_per_chunk=4096,
+                num_samples_per_ray=512,
                 background_intensity=1.0,
-                max_optical_depth=80.0,
             ),
         ),
         optimizers={
             "fields": {
                 "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(lr_final=1e-4, max_steps=50000),
+                "scheduler": ExponentialDecaySchedulerConfig(lr_final=1e-5, max_steps=10000),
             },
         },
-        viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+        viewer=ViewerConfig(num_rays_per_chunk=4096),
         vis="viewer",
     ),
     description="X-ray attenuation reconstruction method.",

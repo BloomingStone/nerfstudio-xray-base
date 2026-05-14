@@ -31,11 +31,11 @@ class XRayModelConfig(ModelConfig):
     field: XRayFieldConfig = dataclass_field(default_factory=XRayFieldConfig)
     num_samples_per_ray: int = 1024
     background_intensity: float = 1.0
-    max_optical_depth: float = 80.0
 
 
 class XRayModel(Model):
     """Renders projection-plane x-ray intensity from density predictions."""
+    config: XRayModelConfig
 
     def populate_modules(self):
         config = cast(XRayModelConfig, self.config)
@@ -105,7 +105,9 @@ class XRayModel(Model):
         gt = batch["image"].to(self.device)[..., :1]
         pred = outputs["intensity"]
         loss = self.intensity_loss(pred, gt)
-        return {"xray_loss": loss}
+        loss_dict: Dict[str, Tensor] = {"xray_loss": loss}
+
+        return loss_dict
 
     def get_image_metrics_and_images(
         self, outputs: Dict[str, Tensor], batch: Dict[str, Tensor]
@@ -119,10 +121,8 @@ class XRayModel(Model):
             "img": torch.cat([gt_rgb, pred_rgb], dim=1),
             "accumulation": torch.cat([
                 colormaps.apply_colormap(outputs["accumulation"]),
-                colormaps.apply_colormap(outputs["accumulation"]),
             ], dim=1),
             "depth": torch.cat([
-                colormaps.apply_depth_colormap(outputs["depth"], accumulation=outputs["accumulation"]),
                 colormaps.apply_depth_colormap(outputs["depth"], accumulation=outputs["accumulation"]),
             ], dim=1),
             "optical_depth": outputs["optical_depth"].repeat_interleave(3, dim=-1),
