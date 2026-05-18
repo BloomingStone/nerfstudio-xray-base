@@ -15,5 +15,7 @@ xray_base_dataparser = 'xray_base.dataparser_config:xray_base_dataparser'
 [project.entry-points.'nerfstudio.method_configs']
 xray_base = 'xray_base.method_config:xray_base'
 xray_dynamic = 'xray_base.method_config:xray_dynamic'
+xray_kplanes = 'xray_base.method_config:xray_kplanes'
+xray_kplanes_dynamic = 'xray_base.method_config:xray_kplanes_dynamic'
 
 

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from nerfstudio.configs.base_config import ViewerConfig
 from nerfstudio.engine.optimizers import AdamOptimizerConfig
-from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
+from nerfstudio.engine.schedulers import CosineDecaySchedulerConfig, ExponentialDecaySchedulerConfig
 from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.field_components.temporal_distortions import TemporalDistortionKind
 from nerfstudio.plugins.types import MethodSpecification
 
 from xray_base.xray_model import XRayModelConfig
+from xray_base.xray_kplanes_model import XRayKPlanesModelConfig
 from xray_base.rotate_xray_dataparser import RotatedXRayDataParserConfig
 from xray_base.xray_pipeline import XrayPipelineConfig
 from xray_base.xray_datamanager import XrayDataManagerConfig
@@ -43,7 +44,7 @@ xray_base = MethodSpecification(
         viewer=ViewerConfig(num_rays_per_chunk=2048),
         vis="viewer",
     ),
-    description="Static X-ray attenuation reconstruction.",
+    description="Static X-ray attenuation reconstruction (MLP-based).",
 )
 
 xray_dynamic = MethodSpecification(
@@ -84,6 +85,110 @@ xray_dynamic = MethodSpecification(
         viewer=ViewerConfig(num_rays_per_chunk=2048),
         vis="viewer",
     ),
-    description="Dynamic X-ray reconstruction with temporal deformation field.",
+    description="Dynamic X-ray reconstruction (MLP + D-NeRF deformation).",
 )
+
+# fmt: off
+xray_kplanes = MethodSpecification(
+    config=TrainerConfig(
+        method_name="xray_kplanes",
+        steps_per_eval_batch=500,
+        steps_per_save=2000,
+        max_num_iterations=30001,
+        mixed_precision=True,
+        pipeline=XrayPipelineConfig(
+            datamanager=XrayDataManagerConfig(
+                dataparser=RotatedXRayDataParserConfig(time_field="phase"),
+                train_num_rays_per_batch=1024,
+                eval_num_rays_per_batch=2048,
+            ),
+            model=XRayKPlanesModelConfig(
+                eval_num_rays_per_chunk=4096,
+                background_intensity=1.0,
+                grid_base_resolution=(128, 128, 128),
+                grid_feature_dim=32,
+                multiscale_res=(1, 2, 4),
+                num_samples_per_ray=48,
+                proposal_net_args_list=[
+                    {"num_output_coords": 8, "resolution": [64, 64, 64]},
+                    {"num_output_coords": 8, "resolution": [128, 128, 128]},
+                ],
+                loss_coefficients={
+                    "xray_loss": 1.0,
+                    "interlevel": 1.0,
+                    "distortion": 0.001,
+                    "plane_tv": 0.01,
+                    "plane_tv_proposal_net": 0.0001,
+                },
+            ),
+        ),
+        optimizers={
+            "proposal_networks": {
+                "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-12),
+                "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+            },
+            "fields": {
+                "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-12),
+                "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+            },
+        },
+        viewer=ViewerConfig(num_rays_per_chunk=4096),
+        vis="viewer",
+    ),
+    description="Static X-ray reconstruction (K-Planes grid).",
+)
+
+xray_kplanes_dynamic = MethodSpecification(
+    config=TrainerConfig(
+        method_name="xray_kplanes_dynamic",
+        steps_per_eval_batch=500,
+        steps_per_save=2000,
+        max_num_iterations=30001,
+        mixed_precision=True,
+        pipeline=XrayPipelineConfig(
+            datamanager=XrayDataManagerConfig(
+                dataparser=RotatedXRayDataParserConfig(time_field="phase"),
+                train_num_rays_per_batch=1024,
+                eval_num_rays_per_batch=2048,
+            ),
+            model=XRayKPlanesModelConfig(
+                eval_num_rays_per_chunk=4096,
+                background_intensity=1.0,
+                grid_base_resolution=(128, 128, 128, 25),
+                grid_feature_dim=32,
+                multiscale_res=(1, 2, 4),
+                num_samples_per_ray=48,
+                proposal_net_args_list=[
+                    {"num_output_coords": 8, "resolution": [64, 64, 64, 25]},
+                    {"num_output_coords": 8, "resolution": [128, 128, 128, 25]},
+                ],
+                loss_coefficients={
+                    "xray_loss": 1.0,
+                    "interlevel": 1.0,
+                    "distortion": 0.001,
+                    "plane_tv": 0.1,
+                    "plane_tv_proposal_net": 0.001,
+                    "l1_time_planes": 0.001,
+                    "l1_time_planes_proposal_net": 0.0001,
+                    "time_smoothness": 0.1,
+                    "time_smoothness_proposal_net": 0.01,
+                },
+            ),
+        ),
+        optimizers={
+            "proposal_networks": {
+                "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-12),
+                "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+            },
+            "fields": {
+                "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-12),
+                "scheduler": CosineDecaySchedulerConfig(warm_up_end=512, max_steps=30000),
+            },
+        },
+        viewer=ViewerConfig(num_rays_per_chunk=4096),
+        vis="viewer",
+    ),
+    description="Dynamic X-ray reconstruction (K-Planes grid + time planes).",
+)
+# fmt: on
 

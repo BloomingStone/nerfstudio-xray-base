@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field as dataclass_field
 from itertools import product
 from pathlib import Path
-from typing import Type, cast
+from typing import Type, cast, Literal
 
 import numpy as np
 import torch
@@ -56,6 +56,8 @@ class RotatedXRayDataParserConfig(DataParserConfig):
     _target: Type = dataclass_field(default_factory=lambda: RotatedXRayDataParser)
     image_dirname: str = "rotate_dsa"
     json_filename: str = "rotate_dsa.json"
+    time_field: Literal["phase", "time_s"] = "phase"
+    """Which field to use for Cameras.times: 'phase' (0-1 normalized heartbeat) or 'time_s' (wall-clock seconds)."""
 
 
 class RotatedXRayDataParser(DataParser):
@@ -63,7 +65,7 @@ class RotatedXRayDataParser(DataParser):
 
     def __init__(self, config: RotatedXRayDataParserConfig):
         super().__init__(config)
-        self.includes_time = False  # x-ray data is static; set True if adding temporal/deformation later
+        self.includes_time = True  # time info provided in data
 
     def _load_json(self) -> tuple[dict, Path]:
         config = cast(RotatedXRayDataParserConfig, self.config)
@@ -106,7 +108,8 @@ class RotatedXRayDataParser(DataParser):
         world_max = world.max(axis=0) + margin
         return torch.tensor(np.stack([world_min, world_max], axis=0), dtype=torch.float32)
 
-    def _cameras_from_metadata(self, metadata: dict) -> Cameras:
+    def _cameras_from_metadata(self, metadata: dict):
+        """Returns (Cameras, times_phase, times_wall)."""
         c_arm = metadata["c_arm_geometry"]
         rotate = metadata["rotate_parameters"]
         frames = metadata["frames"]
@@ -131,7 +134,8 @@ class RotatedXRayDataParser(DataParser):
         m_nerfstudio_orient[:3, :3] = r_nerfstudio_orient
 
         c2w_list = []
-        times = []
+        times_phase = []
+        times_wall = []
         for frame in frames:
             alpha = torch.tensor(float(frame["alpha_degree"]) / 180.0 * torch.pi, dtype=torch.float32)
             beta = torch.tensor(float(frame["beta_degree"]) / 180.0 * torch.pi, dtype=torch.float32)
@@ -142,9 +146,20 @@ class RotatedXRayDataParser(DataParser):
             m_translation[:3, 3] = torch.tensor([0.0, sod, 0.0], dtype=torch.float32)
             m_c2w = m_rotation @ m_translation @ m_nerfstudio_orient
             c2w_list.append(m_c2w[:3, :4])
-            times.append(float(frame["phase"]))
+            times_phase.append(float(frame["phase"]))
+            times_wall.append(float(frame["time_s"]))
 
         camera_to_worlds = torch.stack(c2w_list, dim=0)
+
+        # Select which time field to put into Cameras.times
+        config = cast(RotatedXRayDataParserConfig, self.config)
+        if config.time_field == "phase":
+            times = torch.tensor(times_phase, dtype=torch.float32).unsqueeze(-1)
+        elif config.time_field == "time_s":
+            times = torch.tensor(times_wall, dtype=torch.float32).unsqueeze(-1)
+        else:
+            raise ValueError(f"Unknown time_field '{config.time_field}'; expected 'phase' or 'time_s'")
+
         return Cameras(
             camera_to_worlds=camera_to_worlds,
             fx=torch.full((num_frames, 1), fx, dtype=torch.float32),
@@ -154,8 +169,8 @@ class RotatedXRayDataParser(DataParser):
             width=torch.full((num_frames, 1), width, dtype=torch.int64),
             height=torch.full((num_frames, 1), height, dtype=torch.int64),
             camera_type=CameraType.PERSPECTIVE,
-            times=torch.tensor(times, dtype=torch.float32).unsqueeze(-1),
-        )
+            times=times,
+        ), torch.tensor(times_phase, dtype=torch.float32), torch.tensor(times_wall, dtype=torch.float32)
 
     def _generate_dataparser_outputs(self, split: str = "train", **kwargs) -> DataparserOutputs:
         config = cast(RotatedXRayDataParserConfig, self.config)
@@ -174,7 +189,7 @@ class RotatedXRayDataParser(DataParser):
         affine = np.array(metadata[affine_key], dtype=np.float32).reshape(4, 4)
         scene_box = SceneBox(aabb=self._volume_aabb(affine, volume_size))
 
-        cameras = self._cameras_from_metadata(metadata)
+        cameras, times_phase, times_wall = self._cameras_from_metadata(metadata)
         if len(image_filenames) != len(cameras):
             raise RuntimeError(
                 f"Image count ({len(image_filenames)}) does not match camera count ({len(cameras)})."
@@ -183,14 +198,7 @@ class RotatedXRayDataParser(DataParser):
         # ---- Coordinate normalization: bring mm-scale coordinates to roughly [-1, 1] ----
         aabb = scene_box.aabb  # (2, 3), in mm
 
-        # # 1) Apply nerfstudio world-transform (COLMAP → nerfstudio convention)
-        # #    Equivalent to _apply_nerfstudio_world_transform in the COLMAP conversion script.
-        # #    Flips the camera look-direction so frustums point toward the volume.
-        # c2w[:, :, 1:3] *= -1                    # negate Y / Z columns of rotation
-        # c2w = c2w[:, [0, 2, 1], :]              # swap rows 1↔2
-        # c2w[:, 2, :] *= -1                      # negate new row 2
-
-        # 2) Center & scale to [-1, 1] + translation
+        #  scale to [-1, 1] + translation
         extent = abs(aabb[1] - aabb[0])  # (3,)
         scale = 2.0 / extent.max().item()  # largest dimension → [-1, 1]
 
@@ -233,5 +241,7 @@ class RotatedXRayDataParser(DataParser):
                 "xray_metadata": metadata,
                 "affine": torch.tensor(affine, dtype=torch.float32),
                 "volume_size": torch.tensor(volume_size, dtype=torch.int64),
+                "time_s": times_wall,
+                "phase": times_phase,
             },
         )
