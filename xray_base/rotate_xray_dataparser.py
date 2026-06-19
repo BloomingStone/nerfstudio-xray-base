@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field as dataclass_field
 from itertools import product
 from pathlib import Path
-from typing import Type, cast
+from typing import Literal, Type, cast
 
 import numpy as np
 import torch
@@ -61,6 +61,14 @@ class RotatedXRayDataParserConfig(DataParserConfig):
     Set to empty string to disable."""
     label_use_aabb_roi: bool = True
     """If True, restrict 3D metrics to the axis-aligned bounding box of the GT label."""
+    eval_mode: Literal["uniform-interval", "all"] = "uniform-interval"
+    """How to split the dataset into train/val.
+    - ``uniform-interval``: keep first & last frames for training, evenly spread
+      ``1 - train_ratio`` frames for validation (recommended for DSA sequences).
+    - ``all``: use all frames for both train and val (no split)."""
+    train_ratio: float = 0.8
+    """Fraction of frames used for training. Only used when ``eval_mode`` is
+    ``uniform-interval``."""
 
 
 class RotatedXRayDataParser(DataParser):
@@ -233,6 +241,46 @@ class RotatedXRayDataParser(DataParser):
             times_wall_norm,
         )
 
+    def _get_split_indices(self, n: int) -> dict[str, list[int]]:
+        """Compute train/val/test index lists following UniformIntervalSpliter.
+
+        Keeps first and last frames for training (they correspond to phase-0 and
+        define the view-angle span), then evenly spreads validation frames across
+        the interior.
+
+        Returns:
+            dict with keys ``"train"``, ``"val"``, ``"test"`` (val == test).
+        """
+        config = cast(RotatedXRayDataParserConfig, self.config)
+        if config.eval_mode == "all":
+            return {"train": list(range(n)), "val": list(range(n)), "test": list(range(n))}
+
+        target_val = n - int(n * config.train_ratio)
+        if target_val <= 0 or n <= 2:
+            return {"train": list(range(n)), "val": [], "test": []}
+
+        interior = n - 2                     # frames in (0, n-1)
+        val_len = min(target_val, interior)
+
+        if val_len == 1:
+            val_set = {n // 2}
+        else:
+            step = (interior - 1) / (val_len - 1)
+            val_set = {int(round(1 + i * step)) for i in range(val_len)}
+
+        val_set = {max(1, min(n - 2, v)) for v in val_set}
+
+        # backfill if rounding produced fewer unique positions than needed
+        remaining = sorted(set(range(1, n - 1)) - val_set)
+        while len(val_set) < val_len and remaining:
+            best = max(remaining, key=lambda x: min(abs(x - v) for v in val_set))
+            val_set.add(best)
+            remaining.remove(best)
+
+        val_idx = sorted(val_set)[:val_len]
+        train_idx = [i for i in range(n) if i not in val_idx]
+        return {"train": train_idx, "val": val_idx, "test": val_idx}
+
     def _generate_dataparser_outputs(self, split: str = "train", **kwargs) -> DataparserOutputs:
         config = cast(RotatedXRayDataParserConfig, self.config)
         metadata, data_dir = self._load_json()
@@ -292,6 +340,30 @@ class RotatedXRayDataParser(DataParser):
 
         if split not in {"train", "val", "test"}:
             raise ValueError(f"Unsupported split: {split}")
+
+        # ---- Train/Val split -------------------------------------------------
+        split_idx = self._get_split_indices(len(image_filenames))
+        indices = split_idx[split]  # list[int]
+
+        if not indices:
+            # No data for this split — still return an empty-but-valid DataparserOutputs
+            # (nerfstudio handles empty eval datasets gracefully.)
+            empty_cam = cameras[:0]
+            return DataparserOutputs(
+                image_filenames=[],
+                cameras=empty_cam,
+                scene_box=scene_box,
+                dataparser_transform=dataparser_transform,
+                dataparser_scale=1.0,
+                metadata={},
+            )
+
+        image_filenames = [image_filenames[i] for i in indices]
+        idx_tensor = torch.tensor(indices, dtype=torch.long)
+        cameras = cameras[idx_tensor]  # Cameras (TensorDataclass) requires tensor indexing
+        times_phase = times_phase[indices] if indices else times_phase[:0]
+        times_wall = times_wall[indices] if indices else times_wall[:0]
+        # ----------------------------------------------------------------------
 
         label_3d = self._load_label_3d(data_dir)
 
