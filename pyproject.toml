@@ -3,7 +3,7 @@ name = "xray_base"
 description = "Xray nerf base"
 version = "0.1.0"
 
-dependencies = ["nerfstudio >= 0.3.0"] 
+dependencies = ["nerfstudio >= 0.3.0", "nibabel", "monai", "scikit-image", "scipy"]
 
 [tool.setuptools.packages.find]
 include = ["xray_base*"]

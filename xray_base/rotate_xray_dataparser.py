@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field as dataclass_field
 from itertools import product
 from pathlib import Path
-from typing import Type, cast, Literal
+from typing import Type, cast
 
 import numpy as np
 import torch
@@ -56,8 +56,11 @@ class RotatedXRayDataParserConfig(DataParserConfig):
     _target: Type = dataclass_field(default_factory=lambda: RotatedXRayDataParser)
     image_dirname: str = "rotate_dsa"
     json_filename: str = "rotate_dsa.json"
-    time_field: Literal["phase", "time_s"] = "phase"
-    """Which field to use for Cameras.times: 'phase' (0-1 normalized heartbeat) or 'time_s' (wall-clock seconds)."""
+    label_3d_filename: str = "label_3d.nii.gz"
+    """Filename of the 3D ground-truth label (NIfTI) used for 3D metric evaluation.
+    Set to empty string to disable."""
+    label_use_aabb_roi: bool = True
+    """If True, restrict 3D metrics to the axis-aligned bounding box of the GT label."""
 
 
 class RotatedXRayDataParser(DataParser):
@@ -108,6 +111,59 @@ class RotatedXRayDataParser(DataParser):
         world_max = world.max(axis=0) + margin
         return torch.tensor(np.stack([world_min, world_max], axis=0), dtype=torch.float32)
 
+    @staticmethod
+    def _compute_aabb_mask(label: np.ndarray) -> np.ndarray:
+        """Return boolean mask of the axis-aligned bounding box of *label* (non-zero voxels)."""
+        mask = label > 0
+        if not mask.any():
+            return np.zeros_like(mask, dtype=bool)
+        coords = np.argwhere(mask)
+        mn = coords.min(axis=0)
+        mx = coords.max(axis=0)
+        aabb = np.zeros_like(mask, dtype=bool)
+        aabb[mn[0]:mx[0]+1, mn[1]:mx[1]+1, mn[2]:mx[2]+1] = True
+        return aabb
+
+    def _load_label_3d(self, data_dir: Path) -> dict | None:
+        """Load the 3D ground-truth label NIfTI if it exists.
+
+        Tries ``config.label_3d_filename`` first, then falls back to
+        ``coronary_label.nii.gz`` for backward compatibility.
+
+        Returns a dict with keys: ``data`` (D,H,W) uint8, ``affine`` (4,4) float32
+        in *mm*, ``aabb`` (D,H,W) bool, or ``None`` if disabled / not found.
+        """
+        config = cast(RotatedXRayDataParserConfig, self.config)
+        if not config.label_3d_filename:
+            return None
+        # Try configured filename, then known fallback names
+        candidates = [data_dir / config.label_3d_filename]
+        for fallback_name in ("coronary_label.nii.gz", "label_3d.nii.gz", "LCA_label.nii.gz"):
+            fb = data_dir / fallback_name
+            if str(fb) != str(candidates[0]) and fb.exists() and fb not in candidates:
+                candidates.append(fb)
+        label_path = None
+        for p in candidates:
+            if p.exists():
+                label_path = p
+                break
+        if label_path is None:
+            print(f"[RotatedXRayDataParser] 3D label not found at {candidates[0]}, skipping 3D metrics.")
+            return None
+        import nibabel as nib
+
+        nii = nib.load(str(label_path))
+        nii = cast(nib.Nifti1Image, nii)  # for type checker
+        assert nii.affine is not None, "NIfTI label must have an affine"
+        data = np.asanyarray(nii.get_fdata()).astype(np.uint8)
+        aabb = self._compute_aabb_mask(data) if config.label_use_aabb_roi else np.ones_like(data, dtype=bool)
+        return {
+            "data": data,
+            "affine": np.asarray(nii.affine, dtype=np.float32),
+            "aabb": aabb,
+            "filename": config.label_3d_filename,
+        }
+
     def _cameras_from_metadata(self, metadata: dict):
         """Returns (Cameras, times_phase, times_wall)."""
         c_arm = metadata["c_arm_geometry"]
@@ -136,6 +192,7 @@ class RotatedXRayDataParser(DataParser):
         c2w_list = []
         times_phase = []
         times_wall = []
+
         for frame in frames:
             alpha = torch.tensor(float(frame["alpha_degree"]) / 180.0 * torch.pi, dtype=torch.float32)
             beta = torch.tensor(float(frame["beta_degree"]) / 180.0 * torch.pi, dtype=torch.float32)
@@ -150,27 +207,31 @@ class RotatedXRayDataParser(DataParser):
             times_wall.append(float(frame["time_s"]))
 
         camera_to_worlds = torch.stack(c2w_list, dim=0)
+        
+        times_wall_t = torch.tensor(times_wall, dtype=torch.float32)
+        t_min, t_max = times_wall_t.min(), times_wall_t.max()
+        times_wall_norm = (times_wall_t - t_min) / (t_max - t_min + 1e-8)  # [0, 1]
+        times = times_wall_norm.unsqueeze(-1)  # always time_s in Cameras.times
 
-        # Select which time field to put into Cameras.times
-        config = cast(RotatedXRayDataParserConfig, self.config)
-        if config.time_field == "phase":
-            times = torch.tensor(times_phase, dtype=torch.float32).unsqueeze(-1)
-        elif config.time_field == "time_s":
-            times = torch.tensor(times_wall, dtype=torch.float32).unsqueeze(-1)
-        else:
-            raise ValueError(f"Unknown time_field '{config.time_field}'; expected 'phase' or 'time_s'")
+        # Phase goes into Cameras.metadata for downstream use (e.g., phase grid, D-NeRF)
+        phase_tensor = torch.tensor(times_phase, dtype=torch.float32).unsqueeze(-1)  # (N, 1)
 
-        return Cameras(
-            camera_to_worlds=camera_to_worlds,
-            fx=torch.full((num_frames, 1), fx, dtype=torch.float32),
-            fy=torch.full((num_frames, 1), fy, dtype=torch.float32),
-            cx=torch.full((num_frames, 1), cx, dtype=torch.float32),
-            cy=torch.full((num_frames, 1), cy, dtype=torch.float32),
-            width=torch.full((num_frames, 1), width, dtype=torch.int64),
-            height=torch.full((num_frames, 1), height, dtype=torch.int64),
-            camera_type=CameraType.PERSPECTIVE,
-            times=times,
-        ), torch.tensor(times_phase, dtype=torch.float32), torch.tensor(times_wall, dtype=torch.float32)
+        return (
+            Cameras(
+                camera_to_worlds=camera_to_worlds,
+                fx=torch.full((num_frames, 1), fx, dtype=torch.float32),
+                fy=torch.full((num_frames, 1), fy, dtype=torch.float32),
+                cx=torch.full((num_frames, 1), cx, dtype=torch.float32),
+                cy=torch.full((num_frames, 1), cy, dtype=torch.float32),
+                width=torch.full((num_frames, 1), width, dtype=torch.int64),
+                height=torch.full((num_frames, 1), height, dtype=torch.int64),
+                camera_type=CameraType.PERSPECTIVE,
+                times=times,
+                metadata={"phase": phase_tensor},
+            ), 
+            torch.tensor(times_phase, dtype=torch.float32), 
+            times_wall_norm,
+        )
 
     def _generate_dataparser_outputs(self, split: str = "train", **kwargs) -> DataparserOutputs:
         config = cast(RotatedXRayDataParserConfig, self.config)
@@ -219,6 +280,7 @@ class RotatedXRayDataParser(DataParser):
             height=cameras.height,
             camera_type=cameras.camera_type,
             times=cameras.times,
+            metadata=cameras.metadata,
         )
 
         # Store forward transform for exporting back to original coordinates
@@ -230,6 +292,8 @@ class RotatedXRayDataParser(DataParser):
 
         if split not in {"train", "val", "test"}:
             raise ValueError(f"Unsupported split: {split}")
+
+        label_3d = self._load_label_3d(data_dir)
 
         return DataparserOutputs(
             image_filenames=image_filenames,
@@ -243,5 +307,8 @@ class RotatedXRayDataParser(DataParser):
                 "volume_size": torch.tensor(volume_size, dtype=torch.int64),
                 "time_s": times_wall,
                 "phase": times_phase,
+                "label_3d": label_3d,
+                # scale factor applied to world (mm) coords to normalize to ~[-1,1]
+                "world_scale": torch.tensor(scale, dtype=torch.float32),
             },
         )

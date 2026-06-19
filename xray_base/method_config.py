@@ -98,7 +98,7 @@ xray_kplanes = MethodSpecification(
         mixed_precision=True,
         pipeline=XrayPipelineConfig(
             datamanager=XrayDataManagerConfig(
-                dataparser=RotatedXRayDataParserConfig(time_field="phase"),
+                dataparser=RotatedXRayDataParserConfig(),
                 train_num_rays_per_batch=1024,
                 eval_num_rays_per_batch=2048,
             ),
@@ -147,7 +147,7 @@ xray_kplanes_dynamic = MethodSpecification(
         mixed_precision=True,
         pipeline=XrayPipelineConfig(
             datamanager=XrayDataManagerConfig(
-                dataparser=RotatedXRayDataParserConfig(time_field="phase"),
+                dataparser=RotatedXRayDataParserConfig(),
                 train_num_rays_per_batch=1024,
                 eval_num_rays_per_batch=2048,
             ),
@@ -158,6 +158,8 @@ xray_kplanes_dynamic = MethodSpecification(
                 grid_feature_dim=32,
                 multiscale_res=(1, 2, 4),
                 num_samples_per_ray=48,
+                use_phase=True,
+                phase_grid_resolution=16,
                 proposal_net_args_list=[
                     {"num_output_coords": 8, "resolution": [64, 64, 64, 25]},
                     {"num_output_coords": 8, "resolution": [128, 128, 128, 25]},
@@ -172,6 +174,10 @@ xray_kplanes_dynamic = MethodSpecification(
                     "l1_time_planes_proposal_net": 0.0001,
                     "time_smoothness": 0.1,
                     "time_smoothness_proposal_net": 0.01,
+                    "l1_phase_planes": 0.001,
+                    "l1_phase_planes_proposal_net": 0.0001,
+                    "phase_smoothness": 0.1,
+                    "phase_smoothness_proposal_net": 0.01,
                 },
             ),
         ),

@@ -77,6 +77,12 @@ class XRayKPlanesModelConfig(ModelConfig):
     proposal_weights_anneal_slope: float = 10.0
     proposal_weights_anneal_max_num_iters: int = 1000
 
+    use_phase: bool = False
+    """If True, add a parallel phase grid (x, y, z, phase) for periodic cardiac motion.
+    Requires the dataparser to provide ``phase`` in ``Cameras.metadata``."""
+    phase_grid_resolution: int = 16
+    """Number of discrete buckets for the phase axis in the phase grid."""
+
     # Loss coefficients
     loss_coefficients: Dict[str, float] = to_immutable_dict({
         "xray_loss": 1.0,
@@ -88,6 +94,10 @@ class XRayKPlanesModelConfig(ModelConfig):
         "l1_time_planes_proposal_net": 0.001,
         "time_smoothness": 0.1,
         "time_smoothness_proposal_net": 0.01,
+        "l1_phase_planes": 0.001,
+        "l1_phase_planes_proposal_net": 0.001,
+        "phase_smoothness": 0.1,
+        "phase_smoothness_proposal_net": 0.01,
     })
 
 
@@ -109,6 +119,8 @@ class XRayKPlanesModel(Model):
                 grid_base_resolution=config.grid_base_resolution,
                 grid_feature_dim=config.grid_feature_dim,
                 multiscale_res=config.multiscale_res,
+                use_phase=config.use_phase,
+                phase_grid_resolution=config.phase_grid_resolution,
             ),
             aabb=self.scene_box.aabb,
         )
@@ -117,18 +129,25 @@ class XRayKPlanesModel(Model):
         self.density_fns = []
         num_prop_nets = config.num_proposal_iterations
         self._proposal_networks = torch.nn.ModuleList()
-        if config.use_same_proposal_network:
-            assert len(config.proposal_net_args_list) == 1, \
-                "Only one proposal network is allowed with use_same_proposal_network."
-            prop_net_args = config.proposal_net_args_list[0]
-            network = XRayKPlanesField(
+
+        def _build_proposal_net(resolution_args: Dict) -> XRayKPlanesField:
+            # Proposal networks only do coarse density estimation for sampling,
+            # so we intentionally disable the phase grid here to save memory and
+            # compute. Only the primary (time) field carries the phase grid.
+            return XRayKPlanesField(
                 XRayKPlanesFieldConfig(
-                    grid_base_resolution=prop_net_args["resolution"],
-                    grid_feature_dim=prop_net_args["num_output_coords"],
+                    grid_base_resolution=resolution_args["resolution"],
+                    grid_feature_dim=resolution_args["num_output_coords"],
                     multiscale_res=(1,),
+                    use_phase=False,
                 ),
                 aabb=self.scene_box.aabb,
             )
+
+        if config.use_same_proposal_network:
+            assert len(config.proposal_net_args_list) == 1, \
+                "Only one proposal network is allowed with use_same_proposal_network."
+            network = _build_proposal_net(config.proposal_net_args_list[0])
             self._proposal_networks.append(network)
             self.density_fns.extend([network.density_fn for _ in range(num_prop_nets)])
         else:
@@ -136,14 +155,7 @@ class XRayKPlanesModel(Model):
                 prop_net_args = config.proposal_net_args_list[
                     min(i, len(config.proposal_net_args_list) - 1)
                 ]
-                network = XRayKPlanesField(
-                    XRayKPlanesFieldConfig(
-                        grid_base_resolution=prop_net_args["resolution"],
-                        grid_feature_dim=prop_net_args["num_output_coords"],
-                        multiscale_res=(1,),
-                    ),
-                    aabb=self.scene_box.aabb,
-                )
+                network = _build_proposal_net(prop_net_args)
                 self._proposal_networks.append(network)
             self.density_fns.extend([network.density_fn for network in self._proposal_networks])
 
@@ -235,7 +247,12 @@ class XRayKPlanesModel(Model):
         # Coarse-to-fine sampling via proposal networks
         density_fns = self.density_fns
         if ray_bundle.times is not None:
-            density_fns = [functools.partial(f, times=ray_bundle.times) for f in density_fns]
+            kwargs = {"times": ray_bundle.times}
+            if self.field.use_phase and ray_bundle.metadata is not None:
+                phase = ray_bundle.metadata.get("phase")
+                if phase is not None:
+                    kwargs["phase"] = phase
+            density_fns = [functools.partial(f, **kwargs) for f in density_fns]
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(
             ray_bundle, density_fns=density_fns
         )
@@ -299,6 +316,7 @@ class XRayKPlanesModel(Model):
             prop_grids = [p.grids for p in self.proposal_networks]
             field_grids = [self.field.grids]
             has_time = len(config.grid_base_resolution) == 4
+            use_phase = config.use_phase
 
             metrics_dict["plane_tv"] = _space_tv_loss(field_grids)
             metrics_dict["plane_tv_proposal_net"] = _space_tv_loss(prop_grids)
@@ -308,6 +326,14 @@ class XRayKPlanesModel(Model):
                 metrics_dict["l1_time_planes_proposal_net"] = _l1_time_planes(prop_grids)
                 metrics_dict["time_smoothness"] = _time_smoothness(field_grids)
                 metrics_dict["time_smoothness_proposal_net"] = _time_smoothness(prop_grids)
+
+            if use_phase:
+                phase_field_grids = [self.field.phase_grids]
+                phase_prop_grids = [p.phase_grids for p in self.proposal_networks]
+                metrics_dict["l1_phase_planes"] = _l1_time_planes(phase_field_grids)
+                metrics_dict["l1_phase_planes_proposal_net"] = _l1_time_planes(phase_prop_grids)
+                metrics_dict["phase_smoothness"] = _phase_smoothness(phase_field_grids)
+                metrics_dict["phase_smoothness_proposal_net"] = _phase_smoothness(phase_prop_grids)
 
         return metrics_dict
 
@@ -399,6 +425,29 @@ def _time_smoothness(multi_res_grids: List[Sequence[KPlanesEncoding]]) -> Tensor
             if len(planes) == 6:
                 for ci in (2, 4, 5):
                     total = total + _compute_plane_tv(planes[ci], only_w=True)
+                    num_planes += 1
+            total = total.to(encoding.plane_coefs[0].device)
+    return total / max(num_planes, 1)
+
+
+def _phase_smoothness(multi_res_grids: List[Sequence[KPlanesEncoding]]) -> Tensor:
+    """Smoothness regularization along the phase axis of phase planes (X-p, Y-p, Z-p).
+
+    For a 4D grid with coords ``(x, y, z, phase)`` the phase-containing planes
+    (indices 2, 4, 5) have shape ``(num_components, N_phase, spatial_dim)``.
+    This computes TV along the phase axis (dim=1) to encourage smooth transition
+    between neighbouring phase buckets.
+    """
+    total = torch.tensor(0.0)
+    num_planes = 0
+    for grids in multi_res_grids:
+        for encoding in grids:
+            planes = encoding.plane_coefs
+            if len(planes) == 6:
+                for ci in (2, 4, 5):
+                    # TV along height = phase axis (dim=1)
+                    tv = torch.square(planes[ci][:, 1:, :] - planes[ci][:, :-1, :]).mean()
+                    total = total + tv
                     num_planes += 1
             total = total.to(encoding.plane_coefs[0].device)
     return total / max(num_planes, 1)
