@@ -61,6 +61,10 @@ class RotatedXRayDataParserConfig(DataParserConfig):
     Set to empty string to disable."""
     label_use_aabb_roi: bool = True
     """If True, restrict 3D metrics to the axis-aligned bounding box of the GT label."""
+    use_phase_as_time: bool = False
+    """If True, use cardiac phase (``frame["phase"]``) as ``Cameras.times`` instead
+    of wall-clock time. Useful for synthetic data where only cardiac (periodic)
+    motion exists and wall-clock time has no meaningful temporal relationship."""
     eval_mode: Literal["uniform-interval", "all"] = "uniform-interval"
     """How to split the dataset into train/val.
     - ``uniform-interval``: keep first & last frames for training, evenly spread
@@ -216,13 +220,18 @@ class RotatedXRayDataParser(DataParser):
 
         camera_to_worlds = torch.stack(c2w_list, dim=0)
         
+        config = cast(RotatedXRayDataParserConfig, self.config)
+
         times_wall_t = torch.tensor(times_wall, dtype=torch.float32)
         t_min, t_max = times_wall_t.min(), times_wall_t.max()
         times_wall_norm = (times_wall_t - t_min) / (t_max - t_min + 1e-8)  # [0, 1]
-        times = times_wall_norm.unsqueeze(-1)  # always time_s in Cameras.times
 
-        # Phase goes into Cameras.metadata for downstream use (e.g., phase grid, D-NeRF)
         phase_tensor = torch.tensor(times_phase, dtype=torch.float32).unsqueeze(-1)  # (N, 1)
+
+        if config.use_phase_as_time:
+            times = phase_tensor  # phase → Cameras.times
+        else:
+            times = times_wall_norm.unsqueeze(-1)  # wall-clock time → Cameras.times
 
         return (
             Cameras(
