@@ -39,9 +39,9 @@ class Metric3DConfig:
 
     enabled: bool = True
     """If True, compute 3D metrics (Dice/HD95/clDice) during eval."""
-    thresholds_absolute: Tuple[float, ...] = (0.0344, )
+    thresholds_absolute: Tuple[float, ...] = (2.0, )
     """Absolute density thresholds for binarising the predicted volume."""
-    thresholds_percentile: Tuple[float, ...] = (0.95, )
+    thresholds_percentile: Tuple[float, ...] = (0.995, )
     """Percentile-based thresholds (0-1) computed over the ROI volume."""
     eval_time: float = 0.5
     """Normalised wall-clock time (0-1) at which to evaluate 3D metrics.
