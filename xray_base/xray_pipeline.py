@@ -249,8 +249,11 @@ class XrayPipeline(VanillaPipeline):
             if cfg.thresholds_percentile:
                 vol_roi = vol_pred[aabb_roi]
                 if vol_roi.numel() > 0:
+                    # Use numpy.percentile instead of torch.quantile because
+                    # torch.quantile can produce incorrect results on large tensors.
+                    vol_roi_np = vol_roi.cpu().numpy()
                     for pct in cfg.thresholds_percentile:
-                        thr_val = float(torch.quantile(vol_roi.cpu(), pct))
+                        thr_val = float(np.percentile(vol_roi_np, pct * 100))
                         thresholds.append((f"thd-{pct * 100:.2f}%", thr_val))
 
             result: Dict[str, float] = {}
@@ -269,9 +272,9 @@ class XrayPipeline(VanillaPipeline):
             for name, val in density_metrics.items():
                 result[f"metric3D/density/{name}"] = float(val)
             return result
-        except Exception as e:  # noqa: BLE001
-            warnings.warn(f"Error computing 3D metrics: {e}")
-            print(f"Error computing 3D metrics: {e}")
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
             return {}
 
     def get_training_callbacks(
@@ -303,7 +306,10 @@ class XrayPipeline(VanillaPipeline):
 
         metric3d = self._compute_3d_metrics(step=step)
         if metric3d:
-            writer.put_dict(name="Final 3D Metrics Dict", scalar_dict=metric3d, step=step)
+            # Use step+1 to avoid wandb's "steps must be monotonically increasing" error:
+            # the AFTER_TRAIN callback runs after writer.write_out_storage() in the
+            # trainer, which may have already logged events at the same step number.
+            writer.put_dict(name="Final 3D Metrics Dict", scalar_dict=metric3d, step=step + 1)
             writer.write_out_storage()
             print(f"[3D Metrics] Done. Logged {len(metric3d)} metrics to writer.", flush=True)
             for k, v in metric3d.items():
