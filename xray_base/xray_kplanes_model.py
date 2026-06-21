@@ -11,6 +11,8 @@ import torch
 from torch import Tensor
 from torch.nn import Parameter
 from torchmetrics.image import PeakSignalNoiseRatio
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.cameras.rays import RayBundle
@@ -186,6 +188,8 @@ class XRayKPlanesModel(Model):
 
         # --- Metrics ---
         self.psnr = PeakSignalNoiseRatio(data_range=1.0)
+        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
+        self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True)
     
     @property
     def proposal_networks(self) -> Sequence[XRayKPlanesField]:
@@ -354,10 +358,31 @@ class XRayKPlanesModel(Model):
     ) -> Tuple[Dict[str, float], Dict[str, Tensor]]:
         gt = batch["image"].to(self.device)[..., :1]
         pred = outputs["intensity"]
-        metrics_dict = {"psnr": float(self.psnr(pred, gt))}
 
-        gt_rgb = gt.repeat_interleave(3, dim=-1)
+        # L1 loss
+        l1 = float(torch.abs(pred - gt).mean().item())
+
+        # PSNR on single-channel
+        psnr = float(self.psnr(pred, gt).item())
+
+        # SSIM and LPIPS require 3-channel images in [0,1] with shape [1, 3, H, W]
+        gt_rgb = gt.repeat_interleave(3, dim=-1)  # [H, W, 3]
         pred_rgb = pred.repeat_interleave(3, dim=-1)
+
+        # Move from [H, W, C] to [1, C, H, W]
+        gt_rgb_4d = torch.moveaxis(gt_rgb, -1, 0)[None, ...]
+        pred_rgb_4d = torch.moveaxis(pred_rgb, -1, 0)[None, ...]
+
+        ssim = float(self.ssim(gt_rgb_4d, pred_rgb_4d).item())
+        lpips = float(self.lpips(gt_rgb_4d, pred_rgb_4d).item())
+
+        metrics_dict = {
+            "psnr": psnr,
+            "ssim": ssim,
+            "lpips": lpips,
+            "l1": l1,
+        }
+
         images_dict: Dict[str, Tensor] = {
             "img": torch.cat([gt_rgb, pred_rgb], dim=1),
             "accumulation": torch.cat([
