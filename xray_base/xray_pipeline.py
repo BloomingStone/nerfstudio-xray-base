@@ -306,10 +306,14 @@ class XrayPipeline(VanillaPipeline):
 
         metric3d = self._compute_3d_metrics(step=step)
         if metric3d:
-            # Use step+1 to avoid wandb's "steps must be monotonically increasing" error:
-            # the AFTER_TRAIN callback runs after writer.write_out_storage() in the
-            # trainer, which may have already logged events at the same step number.
-            writer.put_dict(name="Final 3D Metrics Dict", scalar_dict=metric3d, step=step + 1)
+            # Use step+2 to avoid wandb step conflicts:
+            # - The last training iteration's write_out_storage() may have logged at `step`
+            # - The TOTAL_TRAIN_TIME TimeWriter.__exit__ (after _after_train returns)
+            #   writes at GLOBAL_BUFFER["max_iter"] (= step+1 for typical max_num_iterations),
+            #   but its event stays in EVENT_STORAGE without being flushed, potentially
+            #   causing a stale event at step+1 in a subsequent run.
+            # - Using step+2 guarantees 3D metrics are always strictly after both.
+            writer.put_dict(name="Final 3D Metrics Dict", scalar_dict=metric3d, step=step + 2)
             writer.write_out_storage()
             print(f"[3D Metrics] Done. Logged {len(metric3d)} metrics to writer.", flush=True)
             for k, v in metric3d.items():
@@ -322,10 +326,19 @@ class XrayPipeline(VanillaPipeline):
     def get_average_eval_image_metrics(
         self, step: Optional[int] = None, output_path: Optional[typing.Any] = None, get_std: bool = False
     ):
-        """Standard 2D image metrics + 3D segmentation metrics."""
+        """Standard 2D image metrics + 3D segmentation metrics.
+
+        3D metrics are logged separately via writer.put_dict at step+1 to avoid
+        wandb's "steps must be monotonically increasing" warning. If they were
+        merged into the returned dict, the trainer would log them at `step`,
+        which can race with other events at the same step (e.g. TOTAL_TRAIN_TIME
+        at GLOBAL_BUFFER["max_iter"]).
+        """
         metrics_dict = super().get_average_eval_image_metrics(step=step, output_path=output_path, get_std=get_std)
-        # append 3D metrics (independent of images) — unless eval_only_at_end is set
+        # Log 3D metrics separately at step+1 (instead of merging into metrics_dict)
+        # to avoid wandb step conflicts.
         if not self.config.metric3d.eval_only_at_end:
             metric3d = self._compute_3d_metrics(step=step)
-            metrics_dict.update(metric3d)
+            if metric3d and step is not None:
+                writer.put_dict(name="3D Eval Metrics Dict", scalar_dict=metric3d, step=step + 1)
         return metrics_dict
